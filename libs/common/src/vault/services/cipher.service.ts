@@ -2,6 +2,7 @@
 // @ts-strict-ignore
 import {
   combineLatest,
+  distinctUntilChanged,
   filter,
   firstValueFrom,
   map,
@@ -31,6 +32,7 @@ import { LogService } from "../../platform/abstractions/log.service";
 import { uuidAsString } from "../../platform/abstractions/sdk/sdk.service";
 import { FileUploadType } from "../../platform/enums";
 import { MessageSender } from "../../platform/messaging";
+import { compareValues } from "../../platform/misc/compare-values";
 import { StateProvider } from "../../platform/state";
 import { CipherId, CollectionId, OrganizationId, UserId } from "../../types/guid";
 import { OrgKey, UserKey } from "../../types/key";
@@ -120,9 +122,12 @@ export class CipherService implements CipherServiceAbstraction {
       return combineLatest([
         this.encryptedCiphersState(userId).state$,
         this.localData$(userId),
-        this.keyService.cipherDecryptionKeys$(userId),
+        // Only gate and re-trigger decryption, as in `cipherListViewsWithPartials$`: the SDK
+        // decrypts with the keys of its own client.
+        this.keyService.userKey$(userId),
+        this.keyService.encryptedOrgKeys$(userId).pipe(distinctUntilChanged(compareValues)),
       ]).pipe(
-        filter(([ciphers, _, keys]) => ciphers != null && keys != null), // Skip if ciphers haven't been loaded yor synced yet
+        filter(([ciphers, _, userKey]) => ciphers != null && userKey != null), // Skip if ciphers haven't been loaded yor synced yet
         switchMap(() => this.getAllDecryptedIncludingPartials(userId)),
         tap(() => {
           this.messageSender.send("updateOverlayCiphers");
@@ -157,9 +162,13 @@ export class CipherService implements CipherServiceAbstraction {
     return combineLatest([
       this.encryptedCiphersState(userId).state$,
       this.localData$(userId),
-      this.keyService.cipherDecryptionKeys$(userId, true),
+      // The SDK decrypts with the keys of its own client, so these only gate and re-trigger
+      // decryption: on unlock, and when the org keys the SDK client is rebuilt from change.
+      // `cipherDecryptionKeys$` would RSA-decrypt every org key on the main thread first.
+      this.keyService.userKey$(userId),
+      this.keyService.encryptedOrgKeys$(userId).pipe(distinctUntilChanged(compareValues)),
     ]).pipe(
-      filter(([cipherDataState, _, keys]) => cipherDataState != null && keys != null),
+      filter(([cipherDataState, _, userKey]) => cipherDataState != null && userKey != null),
       map(([cipherDataState, localData]) =>
         Object.values(cipherDataState).map(
           (cipherData) => new Cipher(cipherData, localData?.[cipherData.id as CipherId]),
@@ -248,13 +257,15 @@ export class CipherService implements CipherServiceAbstraction {
   /**
    * Drops ciphers for which we no longer have an organization key. Prevents decryption errors
    * before the encrypted cache updates, immediately after a user leaves an organization.
+   *
+   * Only the presence of a key matters, so this reads the encrypted org keys instead of
+   * `cipherDecryptionKeys$`, which would RSA-decrypt every org key before each decryption.
    */
   private async excludeCiphersMissingOrgKey<T extends { organizationId?: string }>(
     ciphers: T[],
     userId: UserId,
   ): Promise<T[]> {
-    const keys = await firstValueFrom(this.keyService.cipherDecryptionKeys$(userId));
-    const orgKeys = keys?.orgKeys;
+    const orgKeys = await firstValueFrom(this.keyService.encryptedOrgKeys$(userId));
     if (orgKeys == null) {
       return ciphers;
     }

@@ -1,5 +1,5 @@
 import { TestBed } from "@angular/core/testing";
-import { firstValueFrom, of } from "rxjs";
+import { BehaviorSubject, firstValueFrom, NEVER, of } from "rxjs";
 
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import {
@@ -292,6 +292,56 @@ describe("AtRiskPasswordCalloutService", () => {
       const result = await firstValueFrom(service.pendingTasks$(userId));
 
       expect(result).toHaveLength(0);
+    });
+
+    it.each([
+      { description: "no pending tasks", tasks: [] as SecurityTask[] },
+      {
+        description: "only pending tasks of another type",
+        tasks: [
+          {
+            id: "t1",
+            cipherId: "c1",
+            type: 999 as SecurityTaskType,
+            status: SecurityTaskStatus.Pending,
+          } as SecurityTask,
+        ],
+      },
+    ])("does not subscribe to the decrypted vault with $description", async ({ tasks }) => {
+      jest.spyOn(mockTaskService, "pendingTasks$").mockReturnValue(of(tasks));
+      const cipherViews$ = jest.spyOn(mockCipherService, "cipherViews$").mockReturnValue(NEVER);
+      cipherViews$.mockClear();
+
+      const result = await firstValueFrom(service.pendingTasks$(userId));
+
+      expect(result).toEqual([]);
+      expect(cipherViews$).not.toHaveBeenCalled();
+    });
+
+    it("subscribes to the decrypted vault once an at-risk task arrives", async () => {
+      const tasks$ = new BehaviorSubject<SecurityTask[]>([]);
+      jest.spyOn(mockTaskService, "pendingTasks$").mockReturnValue(tasks$);
+      const cipherViews$ = jest
+        .spyOn(mockCipherService, "cipherViews$")
+        .mockReturnValue(of([new MockCipherView("c1", false, true, true)]));
+      cipherViews$.mockClear();
+      const emissions: string[][] = [];
+
+      const subscription = service
+        .pendingTasks$(userId)
+        .subscribe((pending) => emissions.push(pending.map((t) => t.id)));
+      tasks$.next([
+        {
+          id: "t1",
+          cipherId: "c1",
+          type: SecurityTaskType.UpdateAtRiskCredential,
+          status: SecurityTaskStatus.Pending,
+        } as SecurityTask,
+      ]);
+      subscription.unsubscribe();
+
+      expect(emissions).toEqual([[], ["t1"]]);
+      expect(cipherViews$).toHaveBeenCalledTimes(1);
     });
   });
 

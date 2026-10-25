@@ -3,7 +3,7 @@ import { BehaviorSubject, Observable, filter, firstValueFrom, map, of, throwErro
 
 // This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
 // eslint-disable-next-line no-restricted-imports
-import { CipherDecryptionKeys, KeyService } from "@bitwarden/key-management";
+import { KeyService } from "@bitwarden/key-management";
 // eslint-disable-next-line no-restricted-imports
 import {
   EncArrayBuffer,
@@ -390,9 +390,7 @@ describe("Cipher Service", () => {
 
     beforeEach(() => {
       configService.checkServerMeetsVersionRequirement$.mockReturnValue(of(true));
-
-      const keys = { userKey: originalUserKey } as CipherDecryptionKeys;
-      keyService.cipherDecryptionKeys$.mockReturnValue(of(keys));
+      keyService.encryptedOrgKeys$.mockReturnValue(of({}));
 
       const cipher1 = new CipherView(encryptionContext.cipher);
       cipher1.id = "Cipher 1" as CipherId;
@@ -532,6 +530,60 @@ describe("Cipher Service", () => {
     });
   });
 
+  describe("cipherViews$ triggers", () => {
+    let getAllDecryptedIncludingPartials: jest.SpyInstance;
+
+    beforeEach(() => {
+      stateProvider.singleUser
+        .getFake(mockUserId, ENCRYPTED_CIPHERS)
+        .nextState({ [cipherData.id]: cipherData } as Record<CipherId, CipherData>);
+      keyService.encryptedOrgKeys$.mockReturnValue(of({}));
+      getAllDecryptedIncludingPartials = jest
+        .spyOn(cipherService as any, "getAllDecryptedIncludingPartials")
+        .mockResolvedValue([new CipherView(encryptionContext.cipher)]);
+    });
+
+    it("does not decrypt the org keys in TypeScript", async () => {
+      await firstValueFrom(cipherService.cipherViews$(mockUserId));
+
+      expect(keyService.cipherDecryptionKeys$).not.toHaveBeenCalled();
+    });
+
+    it("does not decrypt while the user key is unavailable", async () => {
+      keyService.userKey$.mockReturnValue(of(null));
+      const emissions: unknown[] = [];
+
+      const subscription = cipherService
+        .cipherViews$(mockUserId)
+        .subscribe((views) => emissions.push(views));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      subscription.unsubscribe();
+
+      expect(emissions).toEqual([]);
+      expect(getAllDecryptedIncludingPartials).not.toHaveBeenCalled();
+    });
+
+    it("decrypts again only when the encrypted org keys change", async () => {
+      const encryptedOrgKeys$ = new BehaviorSubject<Record<OrganizationId, EncString>>({});
+      keyService.encryptedOrgKeys$.mockReturnValue(encryptedOrgKeys$);
+      const subscription = cipherService.cipherViews$(mockUserId).subscribe();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      encryptedOrgKeys$.next({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(getAllDecryptedIncludingPartials).toHaveBeenCalledTimes(1);
+
+      encryptedOrgKeys$.next({ [orgId]: new EncString(ENCRYPTED_TEXT) } as Record<
+        OrganizationId,
+        EncString
+      >);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(getAllDecryptedIncludingPartials).toHaveBeenCalledTimes(2);
+
+      subscription.unsubscribe();
+    });
+  });
+
   describe("decrypt", () => {
     it("should call decrypt method of CipherEncryptionService", async () => {
       cipherEncryptionService.decrypt.mockResolvedValue(new CipherView(encryptionContext.cipher));
@@ -628,12 +680,14 @@ describe("Cipher Service", () => {
       const normalListView = { id: "normal", partial: false } as unknown as CipherListView;
       const partialListView = { id: "partial", partial: true } as unknown as CipherListView;
 
+      let decryptCiphersWithSdk: jest.SpyInstance;
+
       beforeEach(() => {
         stateProvider.singleUser
           .getFake(mockUserId, ENCRYPTED_CIPHERS)
           .nextState({ [cipherData.id]: cipherData } as Record<CipherId, CipherData>);
-        keyService.cipherDecryptionKeys$.mockReturnValue(of({} as CipherDecryptionKeys));
-        jest
+        keyService.encryptedOrgKeys$.mockReturnValue(of({}));
+        decryptCiphersWithSdk = jest
           .spyOn(cipherService as any, "decryptCiphersWithSdk")
           .mockResolvedValue([[normalListView, partialListView], []]);
       });
@@ -648,6 +702,46 @@ describe("Cipher Service", () => {
         const result = await firstValueFrom(cipherService.cipherListViewsWithPartials$(mockUserId));
 
         expect(result).toEqual([normalListView, partialListView]);
+      });
+
+      it("does not decrypt the org keys in TypeScript", async () => {
+        await firstValueFrom(cipherService.cipherListViewsWithPartials$(mockUserId));
+
+        expect(keyService.cipherDecryptionKeys$).not.toHaveBeenCalled();
+      });
+
+      it("does not decrypt while the user key is unavailable", async () => {
+        keyService.userKey$.mockReturnValue(of(null));
+        const emissions: unknown[] = [];
+
+        const subscription = cipherService
+          .cipherListViewsWithPartials$(mockUserId)
+          .subscribe((views) => emissions.push(views));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        subscription.unsubscribe();
+
+        expect(emissions).toEqual([]);
+        expect(decryptCiphersWithSdk).not.toHaveBeenCalled();
+      });
+
+      it("decrypts again only when the encrypted org keys change", async () => {
+        const encryptedOrgKeys$ = new BehaviorSubject<Record<OrganizationId, EncString>>({});
+        keyService.encryptedOrgKeys$.mockReturnValue(encryptedOrgKeys$);
+        const subscription = cipherService.cipherListViewsWithPartials$(mockUserId).subscribe();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        encryptedOrgKeys$.next({});
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(decryptCiphersWithSdk).toHaveBeenCalledTimes(1);
+
+        encryptedOrgKeys$.next({ [orgId]: new EncString(ENCRYPTED_TEXT) } as Record<
+          OrganizationId,
+          EncString
+        >);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(decryptCiphersWithSdk).toHaveBeenCalledTimes(2);
+
+        subscription.unsubscribe();
       });
     });
 
@@ -842,13 +936,9 @@ describe("Cipher Service", () => {
     const cipher2_id = "22222222-2222-2222-2222-222222222222";
 
     beforeEach(() => {
-      const originalUserKey = new SymmetricCryptoKey(new Uint8Array(32)) as UserKey;
-      const orgKey = new SymmetricCryptoKey(new Uint8Array(32)) as OrgKey;
-      const keys = {
-        userKey: originalUserKey,
-        orgKeys: { [orgId]: orgKey },
-      } as CipherDecryptionKeys;
-      keyService.cipherDecryptionKeys$.mockReturnValue(of(keys));
+      keyService.encryptedOrgKeys$.mockReturnValue(
+        of({ [orgId]: new EncString(ENCRYPTED_TEXT) } as Record<OrganizationId, EncString>),
+      );
 
       mockCiphers = [
         new Cipher({ ...cipherData, id: cipher1_id }),
@@ -894,6 +984,32 @@ describe("Cipher Service", () => {
         mockCiphers,
         userId,
       );
+    });
+
+    it("checks org key presence without decrypting the org keys", async () => {
+      const missingOrgId = "5ff8c0b2-1d3e-4f8c-9b2d-1d3e4f8c0b22" as OrganizationId;
+      const orgCipher = new Cipher({
+        ...cipherData,
+        id: "44444444-4444-4444-4444-444444444444",
+        organizationId: orgId,
+      });
+      const orphanedCipher = new Cipher({
+        ...cipherData,
+        id: "33333333-3333-3333-3333-333333333333",
+        organizationId: missingOrgId,
+      });
+      cipherEncryptionService.decryptManyWithFailures.mockResolvedValue([[], []]);
+
+      await (cipherService as any).decryptCiphersWithSdk(
+        [...mockCiphers, orgCipher, orphanedCipher],
+        userId,
+      );
+
+      expect(cipherEncryptionService.decryptManyWithFailures).toHaveBeenCalledWith(
+        [...mockCiphers, orgCipher],
+        userId,
+      );
+      expect(keyService.cipherDecryptionKeys$).not.toHaveBeenCalled();
     });
 
     it("passes PAM-gated ciphers through the SDK like any other cipher", async () => {

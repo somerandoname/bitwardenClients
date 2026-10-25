@@ -35,23 +35,29 @@ export class HasItemsNudgeService extends DefaultSingleNudgeService {
       }),
     );
 
+    // Only whether a non-deleted item exists matters, which the encrypted ciphers answer without
+    // decrypting the whole vault the way `cipherViews$` would. PAM-gated (partial) rows are left
+    // out, as `cipherViews$` leaves them out.
+    const hasItems$ = this.cipherService
+      .ciphers$(userId)
+      .pipe(
+        map((ciphers) =>
+          Object.values(ciphers).some(
+            (cipher) => cipher.deletedDate == null && cipher.partialData == null,
+          ),
+        ),
+      );
+
     return combineLatest([
-      this.cipherService.cipherViews$(userId),
+      hasItems$,
       this.getNudgeStatus$(nudgeType, userId),
       profileDate$,
       of(Date.now() - THIRTY_DAYS_MS),
     ]).pipe(
-      switchMap(async ([ciphers, nudgeStatus, profileDate, profileCutoff]) => {
+      switchMap(async ([hasItems, nudgeStatus, profileDate, profileCutoff]) => {
         const profileOlderThanCutoff = profileDate.getTime() < profileCutoff;
-        const filteredCiphers = ciphers?.filter((cipher) => {
-          return cipher.deletedDate == null;
-        });
 
-        if (
-          profileOlderThanCutoff &&
-          filteredCiphers.length > 0 &&
-          !nudgeStatus.hasSpotlightDismissed
-        ) {
+        if (profileOlderThanCutoff && hasItems && !nudgeStatus.hasSpotlightDismissed) {
           const dismissedStatus = {
             hasSpotlightDismissed: true,
             hasBadgeDismissed: true,
@@ -64,8 +70,8 @@ export class HasItemsNudgeService extends DefaultSingleNudgeService {
           return nudgeStatus;
         } else {
           return {
-            hasBadgeDismissed: filteredCiphers == null || filteredCiphers.length === 0,
-            hasSpotlightDismissed: filteredCiphers == null || filteredCiphers.length === 0,
+            hasBadgeDismissed: !hasItems,
+            hasSpotlightDismissed: !hasItems,
           };
         }
       }),
